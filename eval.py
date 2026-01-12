@@ -21,26 +21,17 @@ print("Actor loaded")
 input("Press Enter to start episodes...")
 
 for ep in range(10):
-    
+
     state = env.reset()
-    print(f"Starting episode {ep+1}")
-    print(f"State shape: {state.shape}")
-    print(f"State: {state}")
-    print(f"Actor input shape: {actor.net[0].weight.shape}")
-
-    state_tensor = torch.FloatTensor(state)
-    mean, std = actor(state_tensor)
-    print(f"Mean action: {mean}")
-    print(f"Std: {std}")
-
     done = False
     total_reward = 0
     step_count = 0
-    
+
     while not done:
         state_tensor = torch.FloatTensor(state)
-        action, _ = actor.get_action(state_tensor)
-        action = mean.detach().numpy()
+        with torch.no_grad():
+            mean, std = actor(state_tensor)
+        action = mean.numpy()
         
         state, reward, done, info = env.step(action)
         total_reward += reward
