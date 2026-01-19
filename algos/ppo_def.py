@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import torch.nn as nn
 import numpy as np
+from core.buffer import RolloutBuffer
 
 
 class Actor(nn.Module):
@@ -49,41 +50,6 @@ class Critic(nn.Module):
     def forward(self, state):
         return self.net(state)
 
-
-class RolloutBuffer:
-    def __init__(self, size, obs_dim, act_dim):
-        self.size = size
-        self.ptr = 0
-
-        self.states = np.zeros((size, obs_dim))
-        self.actions = np.zeros((size, act_dim))
-        self.rewards = np.zeros(size)
-        self.values = np.zeros(size)
-        self.dones = np.zeros(size)
-        self.log_probs = np.zeros(size)
-    
-    def add(self, state, action, reward, value, done, log_prob):
-
-        self.states[self.ptr] = state
-        self.actions[self.ptr] = action
-        self.rewards[self.ptr] = reward
-        self.values[self.ptr] = value
-        self.dones[self.ptr] = done
-        self.log_probs[self.ptr] = log_prob
-        self.ptr += 1
-
-    def get(self):
-        return(
-            torch.FloatTensor(self.states),
-            torch.FloatTensor(self.actions),
-            torch.FloatTensor(self.rewards),
-            torch.FloatTensor(self.values),
-            torch.FloatTensor(self.dones),
-            torch.FloatTensor(self.log_probs)
-        )
-    
-    def clear(self):
-        self.ptr = 0
 
 class PPO:
     def __init__(self, obs_dim, action_dim, hidden_dim=64, lr=1e-4, gamma=0.99, gae_disc=0.95, eps_clip=0.2, grad_epochs=10):
