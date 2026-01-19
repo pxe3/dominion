@@ -7,6 +7,7 @@ class BaseAlgo(ABC):
     def select_action(self, obs) -> Tuple[Any, ...]:
         pass
 
+    @abstractmethod
     def update(self, buffer) -> Dict[str, float]:
         pass
 

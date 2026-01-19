@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 import numpy as np
 from core.buffer import RolloutBuffer
+from algos.base import BaseAlgo
 
 
 class Actor(nn.Module):
@@ -51,7 +52,7 @@ class Critic(nn.Module):
         return self.net(state)
 
 
-class PPO:
+class PPO(BaseAlgo):
     def __init__(self, obs_dim, action_dim, hidden_dim=64, lr=1e-4, gamma=0.99, gae_disc=0.95, eps_clip=0.2, grad_epochs=10):
 
         self.actor = Actor(obs_dim, action_dim, hidden_dim)
@@ -65,19 +66,26 @@ class PPO:
         self.eps_clip= eps_clip
         self.grad_epochs = grad_epochs
 
-    def select_action(self, state):
-        state = torch.FloatTensor(state)
-        action, log_prob = self.actor.get_action(state)
-        value = self.critic(state).squeeze()
-        return action.detach().numpy(), log_prob.detach().item(), value.detach().item()
+    def select_action(self, states):
+        states = torch.FloatTensor(states)
+        action, log_prob = self.actor.get_action(states)
+        value = self.critic(states).squeeze()
+        return action.detach().numpy(), log_prob.detach().numpy(), value.detach().numpy()
     
     def update(self, buffer: RolloutBuffer):
 
         states, actions, rewards, values, dones, log_probs = buffer.get()
-        v_bootstrap = 0 if dones[-1] else self.critic(states[-1]).detach().item()
-        advantages = get_gae(rewards, values, dones, self.gamma, self.gae_disc, v_bootstrap)
+        v_bootstrap = self.critic(states[-1]).squeeze().detach() * (1-dones[-1]) # 
+        advantages = get_gae_vectorized(rewards, values, dones, self.gamma, self.gae_disc, v_bootstrap)
         returns = (advantages + values).detach()
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        states = states.flatten(0,1)
+        actions = actions.flatten(0,1)
+        log_probs = log_probs.flatten()
+        advantages = advantages.flatten()
+        returns = returns.flatten()
+        
 
         for grad_step in range(self.grad_epochs):
 
@@ -114,3 +122,17 @@ def get_gae(rewards, values, dones, gamma, gae_disc, v_bootstrap):
         advantages.insert(0, gae)
         next_val = values[i]
     return torch.stack(advantages)
+
+
+def get_gae_vectorized(rewards, values, dones, gamma, gae_disc, v_bootstrap):
+    num_steps = rewards.shape[0] # 256 since rewards --> 256 x 8
+    advantages = torch.zeros_like(rewards)
+    gae = torch.zeros(rewards.shape[1]) # 8 cus 8 envs
+    next_val = v_bootstrap # v_bootstrap is a vector if we call the v_boostrap = ... line on a state vector
+
+    for t in reversed(range(num_steps)):
+        td_error = rewards[t] + gamma * next_val * (1-dones[t]) - values[t]
+        gae = td_error + gamma * gae_disc * gae * (1 - dones[t])
+        advantages[t] = gae
+        next_val = values[t]
+    return advantages
