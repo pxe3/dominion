@@ -1,0 +1,25 @@
+# Claude
+.claude/
+PLAN.md
+TEACHER_PLAN.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Training artifacts
+checkpoints/
+outputs/
+*.pth
+
+# Hydra
+outputs/
+multirun/
+
+# OS
+.DS_Store
+Thumbs.db

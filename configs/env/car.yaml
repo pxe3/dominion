@@ -1,0 +1,3 @@
+name: car
+max_steps: 1500
+goal: [-1, 4]

@@ -1,6 +1,6 @@
 # eval.py
-from env_def import Cars
-from ppo_def import Actor
+from envs.env_def import Cars
+from algos.ppo_def import Actor
 import torch
 import time
 
