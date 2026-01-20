@@ -1,7 +1,16 @@
 import torch
 import numpy as np
+from dataclasses import dataclass
 
 
+@dataclass
+class Batch:
+    states: torch.Tensor
+    actions: torch.Tensor
+    rewards: torch.Tensor
+    values: torch.Tensor
+    dones: torch.Tensor
+    log_probs: torch.Tensor
 
 class RolloutBuffer:
     def __init__(self, num_steps, num_envs, obs_dim, act_dim):
@@ -27,7 +36,7 @@ class RolloutBuffer:
         self.ptr += 1
 
     def get(self):
-        return(
+        return Batch(
             torch.FloatTensor(self.states),
             torch.FloatTensor(self.actions),
             torch.FloatTensor(self.rewards),

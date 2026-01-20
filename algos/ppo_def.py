@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 import torch.nn as nn
 import numpy as np
-from core.buffer import RolloutBuffer
+from core.buffer import Batch
 from algos.base import BaseAlgo
 
 
@@ -72,9 +72,15 @@ class PPO(BaseAlgo):
         value = self.critic(states).squeeze()
         return action.detach().numpy(), log_prob.detach().numpy(), value.detach().numpy()
     
-    def update(self, buffer: RolloutBuffer):
+    def update(self, buffer: Batch):
 
-        states, actions, rewards, values, dones, log_probs = buffer.get()
+        states = buffer.states
+        actions = buffer.actions
+        rewards = buffer.rewards
+        values = buffer.values
+        dones = buffer.dones
+        log_probs = buffer.log_probs
+        
         v_bootstrap = self.critic(states[-1]).squeeze().detach() * (1-dones[-1]) # 
         advantages = get_gae_vectorized(rewards, values, dones, self.gamma, self.gae_disc, v_bootstrap)
         returns = (advantages + values).detach()
