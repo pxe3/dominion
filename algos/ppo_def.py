@@ -80,7 +80,7 @@ class PPO(BaseAlgo):
         values = buffer.values
         dones = buffer.dones
         log_probs = buffer.log_probs
-        
+
         v_bootstrap = self.critic(states[-1]).squeeze().detach() * (1-dones[-1]) # 
         advantages = get_gae_vectorized(rewards, values, dones, self.gamma, self.gae_disc, v_bootstrap)
         returns = (advantages + values).detach()
@@ -111,7 +111,6 @@ class PPO(BaseAlgo):
             self.actor_optim.step()
             self.critic_optim.step()
 
-        buffer.clear()
 
 def get_gae(rewards, values, dones, gamma, gae_disc, v_bootstrap):
     # 1 td errors : reward + gamma * next_val(1-dones[t]) - values[t]

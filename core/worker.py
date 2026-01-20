@@ -37,6 +37,7 @@ class RolloutWorker:
     def run(self):
         while True:
             batch = self.collect_rollout()
+            self.buffer.clear()
             self.trajectory_queue.put(batch)
             self.sync_weights()
 
