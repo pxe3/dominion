@@ -32,7 +32,7 @@ class RolloutWorker:
         if self.weight_queue.empty():
             pass
         else:
-            self.policy.load_state_dict(self.weight_queue.get())
+            self.policy.ac.load_state_dict(self.weight_queue.get())
 
     def run(self):
         while True:

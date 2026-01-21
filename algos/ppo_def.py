@@ -6,60 +6,46 @@ from core.buffer import Batch
 from algos.base import BaseAlgo
 
 
-class Actor(nn.Module):
+class ActorCritic(nn.Module):
     def __init__(self, obs_dim, action_dim, hidden_dim=64):
         super().__init__()
-        self.net = nn.Sequential(
+        self.backbone = nn.Sequential(
             nn.Linear(obs_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, action_dim)
         )
+        self.actor_head = nn.Linear(hidden_dim, action_dim)
+        self.critic_head = nn.Linear(hidden_dim, 1)
         self.log_std = nn.Parameter(torch.ones(action_dim) * -0.5)
 
     def forward(self, state):
-        mean = self.net(state)
+        backbone = self.backbone(state)
+        action_mean = self.actor_head(backbone)
         std = torch.exp(self.log_std)
-        return (mean, std)
+        value = self.critic_head(backbone)
+
+        return (action_mean, std, value)
     
     def get_action(self, state):
-        mean, stdev = self.forward(state)
+        mean, stdev, _ = self.forward(state)
         dist = torch.distributions.Normal(mean, stdev)
         action = dist.sample()
         log_prob = dist.log_prob(action).sum(dim=-1) 
         return action, log_prob
     
     def get_log_prob(self, state, action):
-        mean, std = self.forward(state)
+        mean, std, _ = self.forward(state)
         dist = torch.distributions.Normal(mean, std)
         log_prob = dist.log_prob(action).sum(dim=-1)
         return log_prob
 
 
-class Critic(nn.Module):
-    def __init__(self, obs_dim, hidden_dim=64):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(obs_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1) # critic only predicts value
-        )
-    
-    def forward(self, state):
-        return self.net(state)
-
-
 class PPO(BaseAlgo):
     def __init__(self, obs_dim, action_dim, hidden_dim=64, lr=1e-4, gamma=0.99, gae_disc=0.95, eps_clip=0.2, grad_epochs=10):
 
-        self.actor = Actor(obs_dim, action_dim, hidden_dim)
-        self.actor_optim = torch.optim.Adam(self.actor.parameters(), lr)
-
-        self.critic = Critic(obs_dim)
-        self.critic_optim = torch.optim.Adam(self.critic.parameters(), lr)
+        self.ac = ActorCritic(obs_dim, action_dim, hidden_dim)
+        self.ac_optim = torch.optim.Adam(self.ac.parameters(), lr)
 
         self.gamma = gamma
         self.gae_disc = gae_disc
@@ -68,23 +54,23 @@ class PPO(BaseAlgo):
 
     def select_action(self, states):
         states = torch.FloatTensor(states)
-        action, log_prob = self.actor.get_action(states)
-        value = self.critic(states).squeeze()
+        action, log_prob = self.ac.get_action(states)
+        value = self.ac.critic_head(self.ac.backbone(states)).squeeze()
         return action.detach().numpy(), log_prob.detach().numpy(), value.detach().numpy()
     
-    def update(self, buffer: Batch):
+    def update(self, batch: Batch):
 
-        states = buffer.states
-        actions = buffer.actions
-        rewards = buffer.rewards
-        values = buffer.values
-        dones = buffer.dones
-        log_probs = buffer.log_probs
+        states = batch.states
+        actions = batch.actions
+        rewards = batch.rewards
+        values = batch.values
+        dones = batch.dones
+        log_probs = batch.log_probs
 
-        v_bootstrap = self.critic(states[-1]).squeeze().detach() * (1-dones[-1]) # 
+        v_bootstrap = self.ac.critic_head(self.ac.backbone(states[-1])).squeeze().detach() * (1-dones[-1]) # 
         advantages = get_gae_vectorized(rewards, values, dones, self.gamma, self.gae_disc, v_bootstrap)
         returns = (advantages + values).detach()
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8) # normalized advantage returns
 
         states = states.flatten(0,1)
         actions = actions.flatten(0,1)
@@ -95,21 +81,19 @@ class PPO(BaseAlgo):
 
         for grad_step in range(self.grad_epochs):
 
-            new_values = self.critic(states).squeeze()
+            new_values = self.ac.critic_head(self.ac.backbone(states)).squeeze()
             critic_loss = ((returns - new_values)**2).mean()
 
-            new_log_probs = self.actor.get_log_prob(states, actions)
+            new_log_probs = self.ac.get_log_prob(states, actions)
             ratio = torch.exp(new_log_probs - log_probs)
             clipped_ratio = torch.clip(ratio, 1-self.eps_clip, 1+self.eps_clip)
             actor_loss = -torch.min(ratio * advantages, clipped_ratio * advantages).mean()
 
             full_loss = actor_loss + critic_loss
 
-            self.actor_optim.zero_grad()
-            self.critic_optim.zero_grad()
+            self.ac_optim.zero_grad()
             full_loss.backward()
-            self.actor_optim.step()
-            self.critic_optim.step()
+            self.ac_optim.step()
 
 
 def get_gae(rewards, values, dones, gamma, gae_disc, v_bootstrap):
