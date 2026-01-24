@@ -1,0 +1,63 @@
+<mujoco>
+  <compiler autolimits="true"/>
+
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" width="512" height="512" rgb1=".1 .2 .3" rgb2=".2 .3 .4"/>
+    <material name="grid" texture="grid" texrepeat="1 1" texuniform="true" reflectance=".2"/>
+  </asset>
+
+  <default>
+    <joint damping=".03" actuatorfrcrange="-0.5 0.5"/>
+    <default class="wheel">
+      <!-- MJX-compatible: sphere instead of cylinder -->
+      <geom type="sphere" size=".03" rgba=".5 .5 1 1"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <geom type="plane" size="5 5 .01" material="grid"/>
+
+    <!-- goal marker - sphere instead of cylinder -->
+    <body name="goal" pos="-1 4 0.01">
+      <geom type="sphere" size="0.1" rgba="1 0 0 0.5" contype="0" conaffinity="0"/>
+    </body>
+
+    <body name="car" pos="0 0 .03">
+      <freejoint/>
+      <light name="top light" pos="0 0 2" mode="trackcom" diffuse=".4 .4 .4"/>
+      <!-- MJX-compatible: box instead of mesh -->
+      <geom name="chasis" type="box" size=".09 .05 .02" rgba=".3 .3 .5 1"/>
+      <geom name="front wheel" pos=".08 0 -.015" type="sphere" size=".015" condim="1" priority="1"/>
+      <light name="front light" pos=".1 0 .02" dir="2 0 -1" diffuse="1 1 1"/>
+      <body name="left wheel" pos="-.07 .06 0">
+        <joint name="left" axis="0 1 0"/>
+        <geom class="wheel"/>
+      </body>
+      <body name="right wheel" pos="-.07 -.06 0">
+        <joint name="right" axis="0 1 0"/>
+        <geom class="wheel"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <tendon>
+    <fixed name="forward">
+      <joint joint="left" coef=".5"/>
+      <joint joint="right" coef=".5"/>
+    </fixed>
+    <fixed name="turn">
+      <joint joint="left" coef="-.5"/>
+      <joint joint="right" coef=".5"/>
+    </fixed>
+  </tendon>
+
+  <actuator>
+    <motor name="forward" tendon="forward" ctrlrange="-1 1"/>
+    <motor name="turn" tendon="turn" ctrlrange="-1 1"/>
+  </actuator>
+
+  <sensor>
+    <jointactuatorfrc name="right" joint="right"/>
+    <jointactuatorfrc name="left" joint="left"/>
+  </sensor>
+</mujoco>

@@ -5,7 +5,7 @@ from envs.base import BaseEnv
 class VecEnv:
 
     def __init__(self, env_fn: Callable[[], BaseEnv], num_envs: int):
-
+        self.num_envs = num_envs
         self.envs = [env_fn() for _ in range(num_envs)]
         self.obs_shape = self.envs[0].observation_shape
         self.action_shape = self.envs[0].action_shape
