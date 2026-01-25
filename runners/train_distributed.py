@@ -4,17 +4,16 @@ import torch
 import numpy as np
 import os
 
-from envs.car_env import CarEnv
-from envs.vec_env import VecEnv
-from envs.mjx_env import MJXEnv
-from algos.ppo_def import PPO
 from core.buffer import RolloutBuffer
 from multiprocessing import Process, Queue
 from core.worker import RolloutWorker
 from core.learner import Learner
 
+from core.registry import ENV_REGISTRY, ALGO_REGISTRY, auto_register
 
 
+auto_register("envs")
+auto_register("algos")
 
 
 class DistributedTrainer:
@@ -25,26 +24,25 @@ class DistributedTrainer:
         self.num_envs = cfg.num_envs
         self.log_interval = cfg.log_interval
         self.seed = cfg.seed
-        self.backend = getattr(cfg.env, 'backend', 'cpu')  # 'cpu' or 'mjx'
 
         self.trajectory_queue = Queue()
         self.weight_queue = Queue()
 
         # Get dims from appropriate env
-        if self.backend == 'mjx':
-            dummy_env = MJXEnv(env_name=cfg.env.name, num_envs=1, seed=0)
-        else:
-            dummy_env = CarEnv(max_steps=cfg.env.max_steps, goal=cfg.env.goal, render=False)
+        dummy_env = ENV_REGISTRY.make(cfg.env.name, **cfg.env.args)
         self.obs_dim = dummy_env.observation_shape[0]
         self.action_dim = dummy_env.action_shape[0]
 
         self.worker_process, self.learner_process = None, None
     
     @staticmethod
-    def _run_workers(env_cfg, obs_dim, action_dim, num_steps, num_envs, cfg_algo, trajectory_queue, weight_queue, backend='cpu'):
-        from envs.mjx_env import MJXEnv  # import here to avoid JAX init in main process
+    def _run_workers(env_cfg, obs_dim, action_dim, num_steps, num_envs, cfg_algo, trajectory_queue, weight_queue):
 
-        ppo = PPO(
+        auto_register("envs")
+        auto_register("algos")
+
+        algo = ALGO_REGISTRY.make(
+            cfg_algo.name,
             obs_dim=obs_dim,
             action_dim=action_dim,
             hidden_dim=cfg_algo.hidden_dim,
@@ -55,35 +53,30 @@ class DistributedTrainer:
             grad_epochs=cfg_algo.grad_epochs
         )
 
-        # Create env based on backend
-        if backend == 'mjx':
-            env = MJXEnv(env_name=env_cfg.name, num_envs=num_envs, seed=0)
-        else:
-            def env_fn():
-                return CarEnv(max_steps=env_cfg.max_steps, goal=env_cfg.goal, render=False)
-            env = VecEnv(env_fn, num_envs)
+
+        def env_fn():
+            return ENV_REGISTRY.make(env_cfg.name, **env_cfg.args)
 
         rolloutWorker = RolloutWorker(
-            env_fn=lambda: None,  # not used, we pass env directly below
-            policy=ppo,
+            env_fn = env_fn,
+            policy=algo,
             num_steps=num_steps,
             num_envs=num_envs,
             trajectory_queue=trajectory_queue,
             weight_queue=weight_queue
         )
-        rolloutWorker.env = env  # override with our env
-        rolloutWorker.obs_shape = env.obs_shape
-        rolloutWorker.action_shape = env.action_shape
-        rolloutWorker.states = env.reset()
+
 
         initial_weights = weight_queue.get()
-        ppo.ac.load_state_dict(initial_weights)
+        algo.ac.load_state_dict(initial_weights)
         rolloutWorker.run()
     
     @staticmethod
     def _run_learner(obs_dim, action_dim, cfg_algo, trajectory_queue, weight_queue):
+        auto_register("algos")
 
-        ppo_m = PPO(
+        algo_m = ALGO_REGISTRY.make(
+            cfg_algo.name,
             obs_dim=obs_dim,
             action_dim=action_dim,
             hidden_dim=cfg_algo.hidden_dim,
@@ -94,10 +87,10 @@ class DistributedTrainer:
             grad_epochs=cfg_algo.grad_epochs
         )
         
-        weight_queue.put(ppo_m.ac.state_dict())
+        weight_queue.put(algo_m.ac.state_dict())
     
         learner = Learner(
-            policy=ppo_m,
+            policy=algo_m,
             trajectory_queue=trajectory_queue,
             weight_queue=weight_queue
         )
@@ -114,7 +107,7 @@ class DistributedTrainer:
         self.worker_process = Process(
             target=DistributedTrainer._run_workers,
             args=(self.cfg.env, self.obs_dim, self.action_dim, self.num_steps,
-            self.num_envs, self.cfg.algo, self.trajectory_queue, self.weight_queue, self.backend)
+            self.num_envs, self.cfg.algo, self.trajectory_queue, self.weight_queue)
         )
 
         self.learner_process.start()

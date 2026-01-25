@@ -1,2 +1,5 @@
-name: ant
-backend: mjx
+name: mjx_ant
+args:
+  env_name: ant
+  num_envs: 1
+  seed: 0

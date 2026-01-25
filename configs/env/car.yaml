@@ -1,4 +1,4 @@
 name: car
-backend: cpu
-max_steps: 1500
-goal: [-1, 4]
+args:
+  max_steps: 1500
+  goal: [-1, 4]

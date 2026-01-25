@@ -4,6 +4,7 @@ import torch.nn as nn
 import numpy as np
 from core.buffer import Batch
 from algos.base import BaseAlgo
+from core.registry import ALGO_REGISTRY
 
 
 class ActorCritic(nn.Module):
@@ -40,7 +41,7 @@ class ActorCritic(nn.Module):
         log_prob = dist.log_prob(action).sum(dim=-1)
         return log_prob
 
-
+@ALGO_REGISTRY.register("ppo")
 class PPO(BaseAlgo):
     def __init__(self, obs_dim, action_dim, hidden_dim=64, lr=1e-4, gamma=0.99, gae_disc=0.95, eps_clip=0.2, grad_epochs=10):
 

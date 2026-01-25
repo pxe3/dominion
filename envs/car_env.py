@@ -3,8 +3,9 @@ import mujoco.viewer
 import numpy as np
 import os
 from envs.base import BaseEnv
+from core.registry import ENV_REGISTRY
 
-
+@ENV_REGISTRY.register("car")
 class CarEnv(BaseEnv):
     def __init__(self, max_steps=1500, seed=0, render=False, goal=None):
          xml_path = os.path.join(os.path.dirname(__file__), 'mujoco_assets', 'car.xml')

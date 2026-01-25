@@ -6,8 +6,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from brax import envs
+from core.registry import ENV_REGISTRY
 
-
+@ENV_REGISTRY.register("mjx_ant")
 class MJXEnv:
     """Brax env wrapper - runs on JAX/MJX, outputs numpy for PyTorch."""
 
