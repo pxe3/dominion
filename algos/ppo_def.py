@@ -28,6 +28,23 @@ class ActorCritic(nn.Module):
 
         return (action_mean, std, value)
     
+    def forward_all(self, state):
+        features = self.backbone(state)
+        mean = self.actor_head(features)
+        std = torch.exp(self.log_std)
+        value = self.critic_head(features).squeeze(-1)
+        dist = torch.distributions.Normal(mean, std)
+        action = dist.sample()
+        log_prob = dist.log_prob(action).sum(dim=-1)
+
+        return{
+            'action': action,
+            'log_prob': log_prob,
+            'value': value,
+            'mean': mean,
+            'std': std,
+        }
+    
     def get_action(self, state):
         mean, stdev, _ = self.forward(state)
         dist = torch.distributions.Normal(mean, stdev)
@@ -52,6 +69,10 @@ class PPO(BaseAlgo):
         self.gae_disc = gae_disc
         self.eps_clip= eps_clip
         self.grad_epochs = grad_epochs
+    
+    @property
+    def model(self):
+        return self.ac
 
     def select_action(self, states):
         states = torch.FloatTensor(states)

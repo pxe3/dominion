@@ -11,4 +11,8 @@ class BaseAlgo(ABC):
     def update(self, buffer) -> Dict[str, float]:
         pass
 
+    @property
+    def model(self):
+        raise NotImplementedError
+
     
