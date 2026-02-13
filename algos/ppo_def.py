@@ -29,17 +29,17 @@ class ActorCritic(nn.Module):
         self.critic_head = nn.Linear(hidden_dim, 1)
         self.log_std = nn.Parameter(torch.ones(action_dim) * -0.5)
 
-    def forward(self, state):
+    def forward(self, obs):
         """Full forward pass returning (action_mean, std, value)."""
-        features = self.backbone(state)
+        features = self.backbone(obs)
         action_mean = self.actor_head(features)
         std = torch.exp(self.log_std)
         value = self.critic_head(features)
         return action_mean, std, value
 
-    def get_log_prob(self, state, action):
+    def get_log_prob(self, obs, action):
         """Compute log-prob of given actions under current policy. Used in PPO update."""
-        mean, std, _ = self.forward(state)
+        mean, std, _ = self.forward(obs)
         dist = Normal(mean, std)
         return dist.log_prob(action).sum(dim=-1)
 
@@ -92,12 +92,12 @@ class PPO(BaseAlgo):
         """Run PPO update: compute GAE, then multiple epochs of clipped surrogate + value loss.
 
         Args:
-            batch: Rollout data with states, actions, rewards, values, dones, log_probs.
+            batch: Rollout data with obs, actions, rewards, values, dones, log_probs.
 
         Returns:
             Dict with 'actor_loss', 'critic_loss', 'total_loss' (averaged over epochs).
         """
-        states = batch.states
+        obs = batch.obs
         actions = batch.actions
         rewards = batch.rewards
         values = batch.values
@@ -106,7 +106,7 @@ class PPO(BaseAlgo):
 
         # Bootstrap value for GAE: V(s_last) * (1 - done_last)
         v_bootstrap = self.ac.critic_head(
-            self.ac.backbone(states[-1])
+            self.ac.backbone(obs[-1])
         ).squeeze().detach() * (1 - dones[-1])
 
         advantages = get_gae_vectorized(rewards, values, dones, self.gamma, self.gae_disc, v_bootstrap)
@@ -114,7 +114,7 @@ class PPO(BaseAlgo):
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # Flatten (num_steps, num_envs) -> (num_steps * num_envs)
-        states = states.flatten(0, 1)
+        obs = obs.flatten(0, 1)
         actions = actions.flatten(0, 1)
         log_probs = log_probs.flatten()
         advantages = advantages.flatten()
@@ -125,10 +125,10 @@ class PPO(BaseAlgo):
         total_critic_loss = 0.0
 
         for _ in range(self.grad_epochs):
-            new_values = self.ac.critic_head(self.ac.backbone(states)).squeeze()
+            new_values = self.ac.critic_head(self.ac.backbone(obs)).squeeze()
             critic_loss = ((returns - new_values) ** 2).mean()
 
-            new_log_probs = self.ac.get_log_prob(states, actions)
+            new_log_probs = self.ac.get_log_prob(obs, actions)
             ratio = torch.exp(new_log_probs - log_probs)
             clipped_ratio = torch.clip(ratio, 1 - self.eps_clip, 1 + self.eps_clip)
             actor_loss = -torch.min(ratio * advantages, clipped_ratio * advantages).mean()

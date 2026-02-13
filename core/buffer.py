@@ -10,7 +10,7 @@ class Batch:
     Fields match what RolloutBuffer collects. For algos that don't produce
     values or log_probs (e.g. diffusion BC), those fields will be zeros.
     """
-    states: torch.Tensor
+    obs: torch.Tensor
     actions: torch.Tensor
     rewards: torch.Tensor
     values: torch.Tensor
@@ -37,16 +37,16 @@ class RolloutBuffer:
         self.num_envs = num_envs
         self.ptr = 0
 
-        self.states = np.zeros((num_steps, num_envs, obs_dim))
+        self.obs = np.zeros((num_steps, num_envs, obs_dim))
         self.actions = np.zeros((num_steps, num_envs, act_dim))
         self.rewards = np.zeros((num_steps, num_envs))
         self.values = np.zeros((num_steps, num_envs))
         self.dones = np.zeros((num_steps, num_envs))
         self.log_probs = np.zeros((num_steps, num_envs))
 
-    def add(self, states, actions, rewards, values, dones, log_probs):
+    def add(self, obs, actions, rewards, values, dones, log_probs):
         """Store one timestep of data across all envs."""
-        self.states[self.ptr] = states
+        self.obs[self.ptr] = obs
         self.actions[self.ptr] = actions
         self.rewards[self.ptr] = rewards
         self.values[self.ptr] = values if values is not None else 0.0
@@ -57,7 +57,7 @@ class RolloutBuffer:
     def get(self):
         """Convert numpy arrays to a Batch of tensors."""
         return Batch(
-            torch.FloatTensor(self.states),
+            torch.FloatTensor(self.obs),
             torch.FloatTensor(self.actions),
             torch.FloatTensor(self.rewards),
             torch.FloatTensor(self.values),

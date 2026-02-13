@@ -1,6 +1,6 @@
 import numpy as np
 from core.buffer import RolloutBuffer
-from envs.vec_env import VecEnv
+from envs.vec_env import SubprocVecEnv
 
 
 class RolloutWorker:
@@ -30,11 +30,11 @@ class RolloutWorker:
         self.action_queue = action_queue
         self.trajectory_queue = trajectory_queue
 
-        self.env = VecEnv(env_fn, num_envs)
+        self.env = SubprocVecEnv(env_fn, num_envs)
         self.obs_shape = self.env.obs_shape
         self.action_shape = self.env.action_shape
 
-        self.states = self.env.reset()
+        self.obs = self.env.reset()
         self.buffer = RolloutBuffer(num_steps, num_envs, self.obs_shape[0], self.action_shape[0])
 
     def collect_rollout(self):
@@ -47,7 +47,7 @@ class RolloutWorker:
 
         for step in range(self.num_steps):
             # Request inference from InferenceServer
-            self.obs_queue.put(self.states)
+            self.obs_queue.put(self.obs)
             outputs = self.action_queue.get()
 
             # 'action' is required; other keys are algo-specific
@@ -55,9 +55,9 @@ class RolloutWorker:
             log_probs = outputs.get("log_prob")
             values = outputs.get("value")
 
-            next_states, rewards, dones, infos = self.env.step(actions)
-            self.buffer.add(self.states, actions, rewards, values, dones, log_probs)
-            self.states = next_states
+            next_obs, rewards, dones, infos = self.env.step(actions)
+            self.buffer.add(self.obs, actions, rewards, values, dones, log_probs)
+            self.obs = next_obs
 
             # Collect completed episode returns for logging
             for info in infos:
