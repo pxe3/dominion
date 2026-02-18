@@ -1,0 +1,35 @@
+# BC training config for diffusion policy on PushT
+seed: 42
+
+# Device
+device: "cuda:0"
+
+# Dataset / action chunking
+T_o: 2        # observation horizon (frames of context)
+T_p: 16       # prediction horizon (action chunk to predict)
+T_a: 8        # action horizon (how many to execute)
+
+# Diffusion
+num_diffusion_steps: 100    # DDPM training steps T
+num_ddim_steps: 10          # DDIM inference steps (fast sampling)
+
+# Model (1D Temporal U-Net)
+base_channels: 128
+channel_mults: [1, 2, 4]
+cond_dim: 256
+
+# Training
+lr: 1e-4
+batch_size: 256
+num_epochs: 200
+num_workers: 4
+log_interval: 10
+
+# Optimizations (toggle for comparison runs)
+mixed_precision: false
+precision: "bf16"             # bf16 or fp16 (only used if mixed_precision=true)
+grad_accum_steps: 1           # 1 = no accumulation
+activation_checkpointing: false
+
+# Logging
+log_dir: "runs"
