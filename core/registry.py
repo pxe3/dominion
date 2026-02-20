@@ -20,7 +20,10 @@ class Registry:
 def auto_register(package_name):
     package = importlib.import_module(package_name)
     for _, module_name, _ in pkgutil.iter_modules(package.__path__):
-        importlib.import_module(f"{package_name}.{module_name}")
+        try:
+            importlib.import_module(f"{package_name}.{module_name}")
+        except ImportError:
+            pass  # Skip modules with missing deps (e.g. car_env without mujoco)
 
 ENV_REGISTRY = Registry()
 ALGO_REGISTRY = Registry()
