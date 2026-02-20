@@ -1,7 +1,11 @@
 import numpy as np
-from multiprocessing import Process, Pipe
+import multiprocessing as stdmp
 from typing import Callable, List, Dict, Tuple
 from envs.base import BaseEnv
+
+# Use fork context explicitly — env workers don't touch CUDA,
+# so fork is safe and avoids pickling issues with spawn.
+_fork_ctx = stdmp.get_context("fork")
 
 
 def _worker_fn(conn, env_fn):
@@ -42,8 +46,8 @@ class SubprocVecEnv:
         self.procs = []
 
         for _ in range(num_envs):
-            parent_conn, child_conn = Pipe()
-            proc = Process(target=_worker_fn, args=(child_conn, env_fn))
+            parent_conn, child_conn = _fork_ctx.Pipe()
+            proc = _fork_ctx.Process(target=_worker_fn, args=(child_conn, env_fn))
             proc.start()
             child_conn.close()  # Parent doesn't use the child end
             self.parent_conns.append(parent_conn)
