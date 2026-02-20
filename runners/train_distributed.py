@@ -1,15 +1,20 @@
-"""Distributed trainer: spawns Worker, InferenceServer, and Learner in separate processes.
+"""Distributed trainer: spawns N Workers, InferenceServer, and Learner in separate processes.
 
-Architecture:
-    Worker (CPU)  <--obs/action queues-->  InferenceServer (GPU)
-                                                  ^
-                                                  | weight queue
-                                                  v
-    Worker  --trajectory queue-->  Learner (GPU)
+Architecture (SEED RL pattern):
+    Worker 0 (CPU)  ──┐
+    Worker 1 (CPU)  ──┤── shared obs_queue ──> InferenceServer (GPU) ──> per-worker action_queues
+    Worker N (CPU)  ──┘                              ^
+                                                     | weight queue
+                                                     v
+    Workers  ── shared trajectory_queue ──>  Learner (GPU)
 
-Each process creates its own algo instance (separate memory spaces).
-The Learner owns the stop condition (max_updates) — when it finishes,
-the orchestrator terminates the other processes.
+Key design choices:
+    - Shared obs_queue: workers tag messages with (worker_id, obs) so the
+      InferenceServer can batch observations from all workers into one forward pass.
+    - Per-worker action_queues: results are routed back to the correct worker.
+    - Shared trajectory_queue: Learner processes rollouts from any worker,
+      first-come-first-served. This is truly asynchronous.
+    - V-trace corrects for the staleness from async data collection.
 """
 
 import hydra
@@ -26,7 +31,7 @@ auto_register("algos")
 
 
 def _make_algo(cfg_algo, obs_dim, action_dim):
-    """Create an algo instance from config. Generic — no PPO-specific kwargs."""
+    """Create an algo instance from config. Generic — no algo-specific kwargs."""
     return ALGO_REGISTRY.make(
         cfg_algo.name,
         obs_dim=obs_dim,
@@ -36,18 +41,18 @@ def _make_algo(cfg_algo, obs_dim, action_dim):
 
 
 def _run_inference_server(cfg_algo, obs_dim, action_dim, device,
-                          obs_queue, action_queue, weight_queue):
+                          obs_queue, action_queues, weight_queue):
     """Process target for InferenceServer."""
     auto_register("algos")
     from core.inference_server import InferenceServer
 
     algo = _make_algo(cfg_algo, obs_dim, action_dim)
-    server = InferenceServer(algo, device, obs_queue, action_queue, weight_queue)
+    server = InferenceServer(algo, device, obs_queue, action_queues, weight_queue)
     server.run()
 
 
 def _run_worker(cfg_env, num_steps, num_envs,
-                obs_queue, action_queue, trajectory_queue):
+                obs_queue, action_queue, trajectory_queue, worker_id):
     """Process target for RolloutWorker."""
     auto_register("envs")
     from core.worker import RolloutWorker
@@ -62,6 +67,7 @@ def _run_worker(cfg_env, num_steps, num_envs,
         obs_queue=obs_queue,
         action_queue=action_queue,
         trajectory_queue=trajectory_queue,
+        worker_id=worker_id,
     )
     worker.run()
 
@@ -87,7 +93,7 @@ def _run_learner(cfg_algo, obs_dim, action_dim, device,
 
 
 class DistributedTrainer:
-    """Thin orchestrator: creates queues, spawns processes, waits for completion.
+    """Orchestrator: creates queues, spawns N workers + inference + learner.
 
     Does not contain any algo-specific logic. All it knows is:
     - How to read config
@@ -98,6 +104,7 @@ class DistributedTrainer:
     def __init__(self, cfg):
         self.cfg = cfg
         self.device = cfg.get("device", "cuda:0" if torch.cuda.is_available() else "cpu")
+        self.num_workers = cfg.get("num_workers", 1)
 
         # Get env dimensions from a throwaway env instance
         dummy_env = ENV_REGISTRY.make(cfg.env.name, **cfg.env.args)
@@ -105,24 +112,38 @@ class DistributedTrainer:
         self.action_dim = dummy_env.action_shape[0]
 
         # Inter-process communication
-        self.obs_queue = Queue()           # Worker -> InferenceServer
-        self.action_queue = Queue()        # InferenceServer -> Worker
-        self.trajectory_queue = Queue()    # Worker -> Learner
-        self.weight_queue = Queue()        # Learner -> InferenceServer
+        self.obs_queue = Queue()              # All Workers -> InferenceServer (shared)
+        self.trajectory_queue = Queue()       # All Workers -> Learner (shared)
+        self.weight_queue = Queue()           # Learner -> InferenceServer
+
+        # Per-worker action queues (InferenceServer routes results back)
+        self.action_queues = {}
+        for i in range(self.num_workers):
+            self.action_queues[i] = Queue()
 
     def start(self):
         """Spawn all processes and wait for the Learner to finish."""
+        log_dir = self.cfg.get("log_dir", None)
+
+        # InferenceServer (1 process, serves all workers)
         inference_proc = Process(
             target=_run_inference_server,
             args=(self.cfg.algo, self.obs_dim, self.action_dim, self.device,
-                  self.obs_queue, self.action_queue, self.weight_queue),
+                  self.obs_queue, self.action_queues, self.weight_queue),
         )
-        worker_proc = Process(
-            target=_run_worker,
-            args=(self.cfg.env, self.cfg.num_steps, self.cfg.num_envs,
-                  self.obs_queue, self.action_queue, self.trajectory_queue),
-        )
-        log_dir = self.cfg.get("log_dir", None)
+
+        # Workers (N processes, each with own action_queue)
+        worker_procs = []
+        for i in range(self.num_workers):
+            proc = Process(
+                target=_run_worker,
+                args=(self.cfg.env, self.cfg.num_steps, self.cfg.num_envs,
+                      self.obs_queue, self.action_queues[i],
+                      self.trajectory_queue, i),
+            )
+            worker_procs.append(proc)
+
+        # Learner (1 process)
         learner_proc = Process(
             target=_run_learner,
             args=(self.cfg.algo, self.obs_dim, self.action_dim, self.device,
@@ -133,16 +154,21 @@ class DistributedTrainer:
         # Start all processes
         inference_proc.start()
         learner_proc.start()
-        worker_proc.start()
+        for proc in worker_procs:
+            proc.start()
+
+        print(f"[Trainer] Started {self.num_workers} workers, 1 inference server, 1 learner")
 
         # Learner has the stop condition — wait for it to finish
         learner_proc.join()
         print("[Trainer] Learner finished, shutting down...")
 
         # Terminate the infinite-loop processes
-        worker_proc.terminate()
+        for proc in worker_procs:
+            proc.terminate()
         inference_proc.terminate()
-        worker_proc.join()
+        for proc in worker_procs:
+            proc.join()
         inference_proc.join()
         print("[Trainer] All processes stopped")
 

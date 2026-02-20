@@ -23,7 +23,7 @@ from typing import Dict
 from algos.base import BaseAlgo
 from algos.diffusion_policy import cosine_beta_schedule
 from algos.diffusion_nets import TemporalUNet
-from algos.ppo_def import get_gae_vectorized
+from algos.ppo_def import get_gae_vectorized, get_vtrace
 from core.registry import ALGO_REGISTRY
 from core.buffer import Batch
 
@@ -128,7 +128,8 @@ class DPPO(BaseAlgo):
                  eta=1.0, min_sampling_std=0.01, min_logprob_std=0.01,
                  gamma_denoising=1.0,
                  lr=3e-4, gamma=0.99, gae_disc=0.95,
-                 eps_clip=0.2, grad_epochs=5):
+                 eps_clip=0.2, grad_epochs=5,
+                 use_vtrace=False, rho_bar=1.0, c_bar=1.0):
         self.obs_dim = obs_dim
         self.action_dim = action_dim
         self.horizon = horizon
@@ -142,6 +143,9 @@ class DPPO(BaseAlgo):
         self.gae_disc = gae_disc
         self.eps_clip = eps_clip
         self.grad_epochs = grad_epochs
+        self.use_vtrace = use_vtrace
+        self.rho_bar = rho_bar
+        self.c_bar = c_bar
 
         # Networks
         if isinstance(channel_mults, (list,)):
@@ -325,7 +329,14 @@ class DPPO(BaseAlgo):
         return total_log_prob
 
     def update(self, batch: Batch) -> Dict[str, float]:
-        """PPO update with chain-based log_prob recomputation."""
+        """PPO update with chain-based log_prob recomputation.
+
+        Supports two advantage estimation modes:
+          - GAE (default): standard on-policy advantage estimation.
+          - V-trace (use_vtrace=True): off-policy correction for async multi-worker.
+            Recomputes log-probs once to get importance ratios, uses clipped IS
+            to correct for stale data. Combines with PPO clipping for stability.
+        """
         device = next(self._model.parameters()).device
         self._to_device(device)
 
@@ -336,15 +347,36 @@ class DPPO(BaseAlgo):
         old_log_probs = batch.log_probs
         chains = batch.extras["denoising_chain"]
 
-        # Bootstrap value for GAE
+        num_steps, num_envs = obs.shape[:2]
+
+        # Bootstrap value
         v_bootstrap = self._model.value_fn(obs[-1]).detach() * (1 - dones[-1])
 
-        advantages = get_gae_vectorized(rewards, values, dones, self.gamma, self.gae_disc, v_bootstrap)
-        returns = (advantages + values).detach()
+        if self.use_vtrace:
+            # V-trace: recompute log-probs under current policy for IS correction
+            obs_flat = obs.flatten(0, 1)
+            chains_flat = chains.flatten(0, 1)
+            with torch.no_grad():
+                target_log_probs_flat = self._recompute_log_probs(obs_flat, chains_flat)
+            target_log_probs = target_log_probs_flat.reshape(num_steps, num_envs)
+
+            returns, advantages = get_vtrace(
+                rewards, values, dones,
+                behavior_log_probs=old_log_probs,
+                target_log_probs=target_log_probs,
+                gamma=self.gamma,
+                bootstrap_value=v_bootstrap,
+                rho_bar=self.rho_bar,
+                c_bar=self.c_bar,
+            )
+        else:
+            # Standard GAE (on-policy)
+            advantages = get_gae_vectorized(rewards, values, dones, self.gamma, self.gae_disc, v_bootstrap)
+            returns = (advantages + values).detach()
+
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # Flatten (num_steps, num_envs) -> N
-        num_steps, num_envs = obs.shape[:2]
         obs_flat = obs.flatten(0, 1)
         old_log_probs_flat = old_log_probs.flatten()
         advantages_flat = advantages.flatten()
@@ -363,7 +395,7 @@ class DPPO(BaseAlgo):
             clipped_ratio = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip)
             actor_loss = -torch.min(ratio * advantages_flat, clipped_ratio * advantages_flat).mean()
 
-            # Value loss
+            # Value loss (against V-trace or GAE targets)
             new_values = self._model.value_fn(obs_flat)
             critic_loss = F.mse_loss(new_values, returns_flat)
 

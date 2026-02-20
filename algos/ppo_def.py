@@ -174,3 +174,75 @@ def get_gae_vectorized(rewards, values, dones, gamma, gae_disc, v_bootstrap):
         advantages[t] = gae
         next_val = values[t]
     return advantages
+
+
+def get_vtrace(rewards, values, dones, behavior_log_probs, target_log_probs,
+               gamma, bootstrap_value, rho_bar=1.0, c_bar=1.0):
+    """V-trace off-policy correction (Espeholt et al., 2018 — IMPALA paper).
+
+    The problem: in async RL, the policy that generated a trajectory (behavior
+    policy mu) is stale — the learner has updated the weights since. Naive
+    policy gradient on stale data gives biased gradients.
+
+    The fix: importance sampling with clipping.
+      rho_t = min(rho_bar, pi(a_t|s_t) / mu(a_t|s_t))   — clips value correction
+      c_t   = min(c_bar,  pi(a_t|s_t) / mu(a_t|s_t))    — clips trace propagation
+
+    V-trace target:
+      v_s = V(s) + sum_{t=s}^{T-1} gamma^{t-s} (prod_{i=s}^{t-1} c_i) * delta_t
+      where delta_t = rho_t * (r_t + gamma * V(s_{t+1}) - V(s_t))
+
+    When on-policy (pi == mu), rho=c=1 and this reduces to TD(lambda=1),
+    similar to GAE with lambda=1.
+
+    Args:
+        rewards: (T, N) rewards.
+        values: (T, N) value estimates V(s_t) from behavior policy.
+        dones: (T, N) done flags.
+        behavior_log_probs: (T, N) log pi_mu(a|s) — policy that generated the data.
+        target_log_probs: (T, N) log pi(a|s) — current policy.
+        gamma: Discount factor.
+        bootstrap_value: (N,) V(s_T) for bootstrapping.
+        rho_bar: Clipping threshold for value correction (default 1.0).
+        c_bar: Clipping threshold for trace propagation (default 1.0).
+
+    Returns:
+        vs: (T, N) V-trace value targets (used for critic loss).
+        advantages: (T, N) policy gradient advantages.
+    """
+    T, N = rewards.shape
+    device = rewards.device
+
+    # Importance sampling ratios: pi(a|s) / mu(a|s)
+    ratios = torch.exp(target_log_probs - behavior_log_probs)
+    rho = torch.clamp(ratios, max=rho_bar)
+    c = torch.clamp(ratios, max=c_bar)
+
+    # Values at t+1 (shift by 1, bootstrap at the end)
+    values_tp1 = torch.zeros(T, N, device=device)
+    values_tp1[:-1] = values[1:]
+    values_tp1[-1] = bootstrap_value
+
+    # TD errors with importance-weighted correction
+    # delta_t = rho_t * (r_t + gamma * V(s_{t+1}) * (1-d_t) - V(s_t))
+    deltas = rho * (rewards + gamma * values_tp1 * (1 - dones) - values)
+
+    # Backward recursion for V-trace targets
+    # vs - V(s) = delta_t + gamma * c_t * (1-d_t) * (vs_{t+1} - V(s_{t+1}))
+    vs_minus_v = torch.zeros(T, N, device=device)
+    for t in reversed(range(T)):
+        if t == T - 1:
+            vs_minus_v[t] = deltas[t]
+        else:
+            vs_minus_v[t] = deltas[t] + gamma * c[t] * (1 - dones[t]) * vs_minus_v[t + 1]
+
+    vs = (values + vs_minus_v).detach()
+
+    # Policy gradient advantages
+    # adv_t = rho_t * (r_t + gamma * v_{t+1} - V(s_t))
+    vs_tp1 = torch.zeros(T, N, device=device)
+    vs_tp1[:-1] = vs[1:]
+    vs_tp1[-1] = bootstrap_value
+    advantages = rho * (rewards + gamma * vs_tp1 * (1 - dones) - values)
+
+    return vs, advantages
