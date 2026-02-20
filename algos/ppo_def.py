@@ -165,7 +165,7 @@ def get_gae_vectorized(rewards, values, dones, gamma, gae_disc, v_bootstrap):
     """
     num_steps = rewards.shape[0]
     advantages = torch.zeros_like(rewards)
-    gae = torch.zeros(rewards.shape[1])
+    gae = torch.zeros(rewards.shape[1], device=rewards.device)
     next_val = v_bootstrap
 
     for t in reversed(range(num_steps)):
