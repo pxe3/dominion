@@ -129,7 +129,7 @@ class DPPO(BaseAlgo):
                  gamma_denoising=1.0,
                  lr=3e-4, gamma=0.99, gae_disc=0.95,
                  eps_clip=0.2, grad_epochs=5,
-                 use_vtrace=False, rho_bar=1.0, c_bar=1.0):
+                 use_vtrace=False, rho_bar=5.0, c_bar=1.0):
         self.obs_dim = obs_dim
         self.action_dim = action_dim
         self.horizon = horizon
