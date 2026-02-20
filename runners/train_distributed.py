@@ -67,7 +67,8 @@ def _run_worker(cfg_env, num_steps, num_envs,
 
 
 def _run_learner(cfg_algo, obs_dim, action_dim, device,
-                 trajectory_queue, weight_queue, max_updates, log_interval):
+                 trajectory_queue, weight_queue, max_updates, log_interval,
+                 log_dir=None):
     """Process target for Learner."""
     auto_register("algos")
     from core.learner import Learner
@@ -80,6 +81,7 @@ def _run_learner(cfg_algo, obs_dim, action_dim, device,
         device=device,
         max_updates=max_updates,
         log_interval=log_interval,
+        log_dir=log_dir,
     )
     learner.run()
 
@@ -120,11 +122,12 @@ class DistributedTrainer:
             args=(self.cfg.env, self.cfg.num_steps, self.cfg.num_envs,
                   self.obs_queue, self.action_queue, self.trajectory_queue),
         )
+        log_dir = self.cfg.get("log_dir", None)
         learner_proc = Process(
             target=_run_learner,
             args=(self.cfg.algo, self.obs_dim, self.action_dim, self.device,
                   self.trajectory_queue, self.weight_queue,
-                  self.cfg.max_updates, self.cfg.log_interval),
+                  self.cfg.max_updates, self.cfg.log_interval, log_dir),
         )
 
         # Start all processes

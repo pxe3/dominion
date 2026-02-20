@@ -1,0 +1,15 @@
+name: dppo
+args:
+  hidden_dim: 256
+  cond_dim: 128
+  num_diffusion_steps: 100
+  num_denoise_steps: 5
+  eta: 1.0
+  min_sampling_std: 0.01
+  min_logprob_std: 0.01
+  gamma_denoising: 1.0
+  lr: 3e-4
+  gamma: 0.99
+  gae_disc: 0.95
+  eps_clip: 0.2
+  grad_epochs: 5

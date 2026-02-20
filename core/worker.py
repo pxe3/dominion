@@ -55,8 +55,13 @@ class RolloutWorker:
             log_probs = outputs.get("log_prob")
             values = outputs.get("value")
 
+            # Collect any extra keys (e.g. denoising_chain for DPPO)
+            known_keys = {"action", "log_prob", "value"}
+            extras = {k: v for k, v in outputs.items() if k not in known_keys}
+            extras = extras if extras else None
+
             next_obs, rewards, dones, infos = self.env.step(actions)
-            self.buffer.add(self.obs, actions, rewards, values, dones, log_probs)
+            self.buffer.add(self.obs, actions, rewards, values, dones, log_probs, extras=extras)
             self.obs = next_obs
 
             # Collect completed episode returns for logging

@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from torch.utils.tensorboard import SummaryWriter
 
 
 class Learner:
@@ -15,7 +16,8 @@ class Learner:
     """
 
     def __init__(self, algo, trajectory_queue, weight_queue,
-                 device="cuda:0", max_updates=None, log_interval=5):
+                 device="cuda:0", max_updates=None, log_interval=5,
+                 log_dir=None):
         """
         Args:
             algo: A BaseAlgo instance (e.g. PPO). Must implement update() and model property.
@@ -24,6 +26,7 @@ class Learner:
             device: Device string to train on (e.g. 'cuda:0', 'cpu').
             max_updates: Stop after this many updates. None = run forever.
             log_interval: Print metrics every N updates.
+            log_dir: Directory for TensorBoard logs. None = no TensorBoard.
         """
         self.algo = algo
         self.device = torch.device(device)
@@ -33,6 +36,7 @@ class Learner:
         self.max_updates = max_updates
         self.log_interval = log_interval
         self.update_count = 0
+        self.writer = SummaryWriter(log_dir) if log_dir else None
 
     def run(self):
         """Main loop: send initial weights, then train until max_updates.
@@ -72,4 +76,15 @@ class Learner:
                         log_str += f" | {k}: {v:.4f}"
                 print(log_str)
 
+            # TensorBoard logging (every update, not just log_interval)
+            if self.writer:
+                if episode_returns:
+                    self.writer.add_scalar("train/avg_episode_return",
+                                           np.mean(episode_returns), self.update_count)
+                if metrics:
+                    for k, v in metrics.items():
+                        self.writer.add_scalar(f"train/{k}", v, self.update_count)
+
+        if self.writer:
+            self.writer.close()
         print(f"[Learner] Finished {self.update_count} updates")
