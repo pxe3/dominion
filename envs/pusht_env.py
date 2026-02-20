@@ -8,6 +8,7 @@ Auto-resets on episode end (same pattern as CarEnv).
 
 import numpy as np
 import gymnasium as gym
+import gym_pusht  # noqa: F401 — registers the PushT-v0 environment with gymnasium
 from envs.base import BaseEnv
 from core.registry import ENV_REGISTRY
 
