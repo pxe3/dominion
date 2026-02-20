@@ -4,14 +4,15 @@ Combines diffusion-based action generation with PPO for RL training.
 The K-step denoising chain is treated as a K-step MDP where each step
 has a tractable Gaussian log-probability, enabling standard policy gradient.
 
+Supports two backbones:
+  - horizon=1:  DiffusionMLP for per-step actions (e.g. car env, action_dim=2)
+  - horizon>1:  TemporalUNet for action chunks (e.g. PushT, horizon=16)
+
 Key idea:
   - predict(): Run stochastic DDIM (eta > 0) to sample actions, recording
     per-step log-probs and the full denoising chain.
   - update(): Recompute log-probs under current weights using the stored chain,
     then apply PPO clipped surrogate + value loss.
-
-Uses MLP noise predictor (not U-Net) since car env has per-step actions
-(action_dim=2) with no temporal structure.
 """
 
 import torch
@@ -21,19 +22,17 @@ import numpy as np
 from typing import Dict
 from algos.base import BaseAlgo
 from algos.diffusion_policy import cosine_beta_schedule
+from algos.diffusion_nets import TemporalUNet
 from algos.ppo_def import get_gae_vectorized
 from core.registry import ALGO_REGISTRY
 from core.buffer import Batch
 
 
 class DiffusionMLP(nn.Module):
-    """MLP noise predictor for per-step actions.
+    """MLP noise predictor for per-step actions (horizon=1).
 
     Input: noisy_action (B, action_dim) + timestep embedding + obs embedding
     Output: predicted noise (B, action_dim)
-
-    Conditioning: time_emb(t) + obs_emb(obs) added as a single conditioning
-    vector, concatenated with noisy_action before the MLP.
     """
 
     def __init__(self, action_dim, obs_dim, hidden_dim=256, cond_dim=128):
@@ -59,16 +58,6 @@ class DiffusionMLP(nn.Module):
         )
 
     def forward(self, noisy_action, timestep, obs):
-        """
-        Args:
-            noisy_action: (B, action_dim) noisy action at current denoising step.
-            timestep: (B,) integer timestep, will be normalized to [0, 1].
-            obs: (B, obs_dim) environment observation.
-
-        Returns:
-            (B, action_dim) predicted noise.
-        """
-        # Normalize timestep to [0, 1] for the embedding
         t_norm = timestep.float().unsqueeze(-1) / 1000.0
         cond = self.time_emb(t_norm) + self.obs_emb(obs)
         x = torch.cat([noisy_action, cond], dim=-1)
@@ -92,7 +81,6 @@ class ValueMLP(nn.Module):
         )
 
     def forward(self, obs):
-        """Returns (B,) value estimates."""
         return self.net(obs).squeeze(-1)
 
 
@@ -100,11 +88,24 @@ class DPPOModel(nn.Module):
     """Wrapper holding both noise predictor and value network.
 
     Single state_dict for weight sync through InferenceServer.
+    Switches between DiffusionMLP (horizon=1) and TemporalUNet (horizon>1).
     """
 
-    def __init__(self, action_dim, obs_dim, hidden_dim=256, cond_dim=128):
+    def __init__(self, action_dim, obs_dim, hidden_dim=256, cond_dim=128,
+                 horizon=1, base_channels=128, channel_mults=(1, 2, 4)):
         super().__init__()
-        self.noise_pred = DiffusionMLP(action_dim, obs_dim, hidden_dim, cond_dim)
+        self.horizon = horizon
+        if horizon > 1:
+            self.noise_pred = TemporalUNet(
+                action_dim=action_dim,
+                obs_dim=obs_dim,
+                T_p=horizon,
+                base_channels=base_channels,
+                channel_mults=tuple(channel_mults),
+                cond_dim=cond_dim,
+            )
+        else:
+            self.noise_pred = DiffusionMLP(action_dim, obs_dim, hidden_dim, cond_dim)
         self.value_fn = ValueMLP(obs_dim, hidden_dim)
 
 
@@ -115,10 +116,14 @@ class DPPO(BaseAlgo):
     Trains a diffusion-based policy via PPO. The denoising chain is treated
     as a multi-step MDP with Gaussian transitions, giving tractable log-probs
     for importance sampling.
+
+    When horizon > 1, uses TemporalUNet to predict action chunks and returns
+    only the first action for env stepping (receding horizon control).
     """
 
     def __init__(self, obs_dim, action_dim,
                  hidden_dim=256, cond_dim=128,
+                 horizon=1, base_channels=128, channel_mults=(1, 2, 4),
                  num_diffusion_steps=100, num_denoise_steps=5,
                  eta=1.0, min_sampling_std=0.01, min_logprob_std=0.01,
                  gamma_denoising=1.0,
@@ -126,6 +131,7 @@ class DPPO(BaseAlgo):
                  eps_clip=0.2, grad_epochs=5):
         self.obs_dim = obs_dim
         self.action_dim = action_dim
+        self.horizon = horizon
         self.num_diffusion_steps = num_diffusion_steps
         self.num_denoise_steps = num_denoise_steps
         self.eta = eta
@@ -138,7 +144,12 @@ class DPPO(BaseAlgo):
         self.grad_epochs = grad_epochs
 
         # Networks
-        self._model = DPPOModel(action_dim, obs_dim, hidden_dim, cond_dim)
+        if isinstance(channel_mults, (list,)):
+            channel_mults = tuple(channel_mults)
+        self._model = DPPOModel(
+            action_dim, obs_dim, hidden_dim, cond_dim,
+            horizon, base_channels, channel_mults,
+        )
         self.optimizer = torch.optim.Adam(self._model.parameters(), lr=lr)
 
         # Noise schedule
@@ -165,31 +176,48 @@ class DPPO(BaseAlgo):
         self._ddim_steps = self._ddim_steps.to(device)
 
     def _get_ddim_sigma(self, ab_curr, ab_prev):
-        """Compute DDIM sigma for stochastic sampling.
-
-        sigma = eta * sqrt((1 - ab_prev) / (1 - ab_curr)) * sqrt(1 - ab_curr / ab_prev)
-        """
+        """Compute DDIM sigma for stochastic sampling."""
         sigma = self.eta * torch.sqrt(
             (1 - ab_prev) / (1 - ab_curr + 1e-8) *
             (1 - ab_curr / (ab_prev + 1e-8))
         )
         return sigma
 
+    def _noise_shape(self, B, device):
+        """Return the right noise shape based on horizon."""
+        if self.horizon > 1:
+            return (B, self.horizon, self.action_dim)
+        return (B, self.action_dim)
+
+    def _chain_shape(self, B, K, device):
+        """Return the right chain storage shape based on horizon."""
+        if self.horizon > 1:
+            return (B, K + 1, self.horizon, self.action_dim)
+        return (B, K + 1, self.action_dim)
+
+    def _flat_log_prob(self, x_next, mu, sigma):
+        """Compute Gaussian log-prob, handling both per-step and chunk shapes.
+
+        Flattens all non-batch dims so the same formula works for
+        (B, action_dim) and (B, horizon, action_dim).
+        """
+        diff = (x_next - mu).reshape(x_next.shape[0], -1)  # (B, D)
+        D = diff.shape[1]
+        sigma_clamped = sigma.clamp(min=self.min_logprob_std)
+        return -0.5 * (
+            D * np.log(2 * np.pi)
+            + 2 * torch.log(sigma_clamped) * D
+            + (diff ** 2 / (sigma_clamped ** 2)).sum(dim=-1)
+        )
+
     def predict(self, obs: torch.Tensor) -> Dict[str, torch.Tensor]:
         """Sample actions via stochastic DDIM denoising.
 
-        Returns action, total log_prob, value, and the full denoising chain
-        needed for log_prob recomputation during update().
+        Returns the first action (for env stepping), total log_prob, value,
+        and the full denoising chain for log_prob recomputation in update().
 
-        Args:
-            obs: (B, obs_dim) observation tensor, already on device.
-
-        Returns:
-            Dict with:
-                action: (B, action_dim) final denoised action
-                log_prob: (B,) total log-prob across all denoising steps
-                value: (B,) value estimate V(obs)
-                denoising_chain: (B, K+1, action_dim) stored chain [a_K, ..., a_0]
+        When horizon > 1, denoises a full action chunk (B, H, action_dim)
+        but only returns action[:, 0, :] for execution.
         """
         device = obs.device
         self._to_device(device)
@@ -198,10 +226,10 @@ class DPPO(BaseAlgo):
 
         with torch.no_grad():
             # Start from pure noise
-            x = torch.randn(B, self.action_dim, device=device)
+            x = torch.randn(*self._noise_shape(B, device), device=device)
 
-            # Store chain: index 0 = a_K (pure noise), index K = a_0 (final)
-            chain = torch.zeros(B, K + 1, self.action_dim, device=device)
+            # Store chain
+            chain = torch.zeros(*self._chain_shape(B, K, device), device=device)
             chain[:, 0] = x
 
             total_log_prob = torch.zeros(B, device=device)
@@ -232,23 +260,22 @@ class DPPO(BaseAlgo):
                 noise = torch.randn_like(x)
                 x_next = mu + sigma * noise
 
-                # Log-prob of this step: log N(x_next | mu, sigma)
-                log_prob_step = -0.5 * (
-                    self.action_dim * np.log(2 * np.pi)
-                    + 2 * torch.log(sigma.clamp(min=self.min_logprob_std)) * self.action_dim
-                    + ((x_next - mu) ** 2 / (sigma.clamp(min=self.min_logprob_std) ** 2)).sum(dim=-1)
-                )
+                # Log-prob of this step
+                log_prob_step = self._flat_log_prob(x_next, mu, sigma)
 
-                # Discount log-prob by denoising step (gamma_denoising^step)
+                # Discount log-prob by denoising step
                 total_log_prob = total_log_prob * self.gamma_denoising + log_prob_step
 
                 x = x_next
-                chain[:, K - i] = x  # store in forward order: chain[:, 1] = a_{K-1}, ..., chain[:, K] = a_0
+                chain[:, K - i] = x
 
             value = self._model.value_fn(obs)
 
+        # For action chunks, return only the first action for env stepping
+        action = x[:, 0, :] if self.horizon > 1 else x
+
         return {
-            "action": x,
+            "action": action,
             "log_prob": total_log_prob,
             "value": value,
             "denoising_chain": chain,
@@ -257,16 +284,8 @@ class DPPO(BaseAlgo):
     def _recompute_log_probs(self, obs, chains):
         """Recompute log-probs under current weights using stored chains.
 
-        This is the DPPO core trick: the chain is stored, so we deterministically
-        recompute what mu would be under the *current* weights, giving us the
-        importance ratio for PPO without re-sampling.
-
-        Args:
-            obs: (N, obs_dim) observations.
-            chains: (N, K+1, action_dim) stored denoising chains.
-
-        Returns:
-            (N,) total log-prob under current policy.
+        The chain is stored, so we deterministically recompute what mu would be
+        under the *current* weights, giving us the importance ratio for PPO.
         """
         device = obs.device
         K = len(self._ddim_steps)
@@ -278,9 +297,8 @@ class DPPO(BaseAlgo):
             t_curr = self._ddim_steps[i]
             t_batch = t_curr.expand(N)
 
-            # Get stored a_{k} (input to this denoising step)
-            x = chains[:, K - 1 - i]  # chain[0]=a_K, chain[1]=a_{K-1}, etc.
-            # Get stored a_{k-1} (output of this denoising step)
+            # Get stored a_{k} and a_{k-1}
+            x = chains[:, K - 1 - i]
             x_next = chains[:, K - i]
 
             # Current model prediction
@@ -300,25 +318,14 @@ class DPPO(BaseAlgo):
             mu = torch.sqrt(ab_prev) * x0_pred + torch.sqrt((1 - ab_prev - sigma**2).clamp(min=0)) * eps_pred
 
             # Log-prob of stored x_next under new mu
-            log_prob_step = -0.5 * (
-                self.action_dim * np.log(2 * np.pi)
-                + 2 * torch.log(sigma) * self.action_dim
-                + ((x_next - mu) ** 2 / (sigma ** 2)).sum(dim=-1)
-            )
+            log_prob_step = self._flat_log_prob(x_next, mu, sigma)
 
             total_log_prob = total_log_prob * self.gamma_denoising + log_prob_step
 
         return total_log_prob
 
     def update(self, batch: Batch) -> Dict[str, float]:
-        """PPO update with chain-based log_prob recomputation.
-
-        Args:
-            batch: Rollout data with extras["denoising_chain"].
-
-        Returns:
-            Dict with actor_loss, critic_loss, total_loss.
-        """
+        """PPO update with chain-based log_prob recomputation."""
         device = next(self._model.parameters()).device
         self._to_device(device)
 
@@ -342,7 +349,7 @@ class DPPO(BaseAlgo):
         old_log_probs_flat = old_log_probs.flatten()
         advantages_flat = advantages.flatten()
         returns_flat = returns.flatten()
-        chains_flat = chains.flatten(0, 1)  # (N, K+1, action_dim)
+        chains_flat = chains.flatten(0, 1)
 
         total_actor_loss = 0.0
         total_critic_loss = 0.0

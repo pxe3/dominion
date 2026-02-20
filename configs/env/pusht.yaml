@@ -1,0 +1,4 @@
+name: pusht
+args:
+  obs_type: state
+  max_steps: 300
