@@ -20,8 +20,8 @@ Key design choices:
 import hydra
 from omegaconf import DictConfig
 import torch
+import torch.multiprocessing as mp
 import numpy as np
-from multiprocessing import Process, Queue
 
 from core.registry import ENV_REGISTRY, ALGO_REGISTRY, auto_register
 
@@ -112,21 +112,21 @@ class DistributedTrainer:
         self.action_dim = dummy_env.action_shape[0]
 
         # Inter-process communication
-        self.obs_queue = Queue()              # All Workers -> InferenceServer (shared)
-        self.trajectory_queue = Queue()       # All Workers -> Learner (shared)
-        self.weight_queue = Queue()           # Learner -> InferenceServer
+        self.obs_queue = mp.Queue()            # All Workers -> InferenceServer (shared)
+        self.trajectory_queue = mp.Queue()    # All Workers -> Learner (shared)
+        self.weight_queue = mp.Queue()        # Learner -> InferenceServer
 
         # Per-worker action queues (InferenceServer routes results back)
         self.action_queues = {}
         for i in range(self.num_workers):
-            self.action_queues[i] = Queue()
+            self.action_queues[i] = mp.Queue()
 
     def start(self):
         """Spawn all processes and wait for the Learner to finish."""
         log_dir = self.cfg.get("log_dir", None)
 
         # InferenceServer (1 process, serves all workers)
-        inference_proc = Process(
+        inference_proc = mp.Process(
             target=_run_inference_server,
             args=(self.cfg.algo, self.obs_dim, self.action_dim, self.device,
                   self.obs_queue, self.action_queues, self.weight_queue),
@@ -135,7 +135,7 @@ class DistributedTrainer:
         # Workers (N processes, each with own action_queue)
         worker_procs = []
         for i in range(self.num_workers):
-            proc = Process(
+            proc = mp.Process(
                 target=_run_worker,
                 args=(self.cfg.env, self.cfg.num_steps, self.cfg.num_envs,
                       self.obs_queue, self.action_queues[i],
@@ -144,7 +144,7 @@ class DistributedTrainer:
             worker_procs.append(proc)
 
         # Learner (1 process)
-        learner_proc = Process(
+        learner_proc = mp.Process(
             target=_run_learner,
             args=(self.cfg.algo, self.obs_dim, self.action_dim, self.device,
                   self.trajectory_queue, self.weight_queue,
@@ -175,6 +175,7 @@ class DistributedTrainer:
 
 @hydra.main(config_path="../configs", config_name="config", version_base=None)
 def main(cfg: DictConfig):
+    mp.set_start_method("spawn", force=True)
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
     trainer = DistributedTrainer(cfg)
