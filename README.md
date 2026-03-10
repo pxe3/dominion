@@ -1,5 +1,3 @@
-hello! this is a personal project on exploring rl infra tooling. almost entirely handwritten with some exceptions.
-the goal is to create a a codebase I can play with to implement papers & new ideas (intermittently, bottlenecked by GPU access)
 <img width="2072" height="1406" alt="dominion_arch" src="https://github.com/user-attachments/assets/173ac24a-aea9-41bb-ade8-edc1c8e1c767" />
 
 as of now:
